@@ -1,0 +1,82 @@
+#!/usr/bin/env python
+from argparse import ArgumentParser
+from parser import parse
+from env import Environ
+from llvm.core import Module, Type
+import sys, os, subprocess
+import proc
+
+parser = ArgumentParser(description="The implementation of the solid lisp (http://github.com/cheery/solid)")
+parser.add_argument("file", help="Input file to the compiler")
+parser.add_argument("--mipsel-gcw0-linux", type=bool, help="Cross-compiles for gcw-zero")
+
+def macro_return(context, expr):
+    if len(expr) != 2:
+        sys.stderr.write("malformed return {}\n".format(expr))
+        sys.exit(1)
+    retval = context.expr(expr[1])
+    context.bb.ret(retval)
+    context.closed = True
+
+def main():
+    args   = parser.parse_args()
+    name, ext = os.path.splitext(args.file)
+
+    with open(args.file) as fd:
+        source = fd.read()
+    program = parse(source)
+
+    env = Environ(
+            toplevel={
+                'proc': proc.macro},
+            types={
+                "void": Type.void(),
+                "i8": Type.int(8),
+                "i32": Type.int(32),
+                "i64": Type.int(64)},
+            names={
+                "return": macro_return,
+                },
+            module=Module.new(name))
+
+    defer = []
+    for stmt in program:
+        if stmt.group == 'list' and len(stmt) > 0 and stmt[0].group == 'symbol':
+            n = stmt[0].value
+            if n in env.toplevel:
+                env.toplevel[n](env, stmt, defer)
+                continue
+            sys.stderr.write("syn error: {}\n".format(stmt))
+            sys.exit(1)
+
+    for fn in defer:
+        fn()
+
+    env.module.verify()
+
+    bitcode_file = name + '.bc'
+    asm_file     = name + '.s'
+    bin_file     = name
+    if args.file == bin_file:
+        bin_file += '.bin'
+    with open(bitcode_file, 'w') as fd:
+        env.module.to_bitcode(fd)
+
+    if args.mipsel_gcw0_linux:
+        cc = '/opt/gcw0-toolchain/usr/bin/mipsel-gcw0-linux-uclibc-gcc'
+        script = [
+                ['llc', '-march=mipsel', bitcode_file, '-o', asm_file],
+                [cc, asm_file, '-o', bin_file]
+        ]
+    else:
+        script = [
+                ['llc', bitcode_file, '-o', asm_file],
+                ['gcc', asm_file, '-o', bin_file]
+        ]
+    for line in script:
+        status = subprocess.call(line)
+        if status != 0:
+            sys.exit(status)
+
+if __name__=='__main__':
+    main()
